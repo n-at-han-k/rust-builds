@@ -1,0 +1,5 @@
+{
+  "repo": "luxms/pgnats",
+  "ref": "latest-tag",
+  "apt": ["pkg-config", "libssl-dev", "clang", "libclang-dev", "postgresql-server-dev-17", "libreadline-dev", "zlib1g-dev", "flex", "bison"]
+}

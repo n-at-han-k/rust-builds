@@ -1,0 +1,6 @@
+{
+  "repo": "luxms/pgrx",
+  "ref": "031b76754a414c8576b9d97228c8d4a8102baeff",
+  "version": "0.15.0",
+  "apt": ["pkg-config", "libssl-dev"]
+}
