@@ -15,18 +15,9 @@ what the release tag is built from.
 
 ## What it produces
 
-A release tagged `<name>-v<version>` with:
-
-| asset | what it is |
-| --- | --- |
-| `<name>-<version>-x86_64-linux.tar.gz` | the build output, unpacked from `result/` |
-| `<name>-<version>-x86_64-linux.nar.gz` | `nix-store --export` of the whole closure |
-| `<name>-<version>-x86_64-linux.sha256` | checksums for both |
-
-The tarball's binaries still carry `/nix/store` references, so it is only
-directly usable where that closure exists. The `.nar.gz` is the honest route
-for a nix consumer: `gunzip < x.nar.gz | nix-store --import`. For regular use
-a binary cache beats both.
+A release tagged `<name>-v<version>` whose assets are the build outputs
+themselves -- the binary for a plain Rust package, the `.so` plus its `.sql`
+and `.control` for a pgrx extension -- alongside a `SHA256SUMS`.
 
 `nixpkgs` is pinned to the same channel as the clan repo so `cargoHash` values
 stay valid in both.

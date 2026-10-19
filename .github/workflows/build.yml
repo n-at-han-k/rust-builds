@@ -64,7 +64,6 @@ jobs:
           version=$(nix eval --raw ".#${{ matrix.package }}.version")
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=${{ matrix.package }}-v$version" >> "$GITHUB_OUTPUT"
-          echo "asset=${{ matrix.package }}-$version-x86_64-linux" >> "$GITHUB_OUTPUT"
 
       # A daily cron is a no-op once the release exists.
       - id: check
@@ -81,21 +80,19 @@ jobs:
       - if: steps.check.outputs.skip == 'false'
         run: nix build --print-build-logs ".#${{ matrix.package }}"
 
-      # The build output, plus the closure as a nix archive so a nix consumer
-      # can import it with its store references intact.
+      # The build outputs themselves are the release assets.
       - if: steps.check.outputs.skip == 'false'
         run: |
           set -euo pipefail
-          asset="${{ steps.meta.outputs.asset }}"
-          tar -czf "$asset.tar.gz" -C result .
-          nix-store --export $(nix-store --query --requisites result) | gzip > "$asset.nar.gz"
-          sha256sum "$asset.tar.gz" "$asset.nar.gz" > "$asset.sha256"
+          mkdir -p dist
+          find -L result -type f -exec cp -t dist {} +
+          chmod -R u+w dist
+          ( cd dist && sha256sum * > SHA256SUMS )
+          ls -l dist
 
       - if: steps.check.outputs.skip == 'false'
         run: |
           gh release create "${{ steps.meta.outputs.tag }}" \
             --title "${{ matrix.package }} ${{ steps.meta.outputs.version }}" \
             --notes "nix build .#${{ matrix.package }} from ${{ github.sha }}" \
-            "${{ steps.meta.outputs.asset }}.tar.gz" \
-            "${{ steps.meta.outputs.asset }}.nar.gz" \
-            "${{ steps.meta.outputs.asset }}.sha256"
+            dist/*
