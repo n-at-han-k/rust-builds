@@ -5,8 +5,8 @@ on:
     - cron: "0 4 * * *"
   workflow_dispatch:
     inputs:
-      project:
-        description: "Only this project (blank = all)"
+      package:
+        description: "Only this package (blank = all)"
         required: false
       force:
         description: "Rebuild even if the release already exists"
@@ -14,7 +14,9 @@ on:
         default: false
   push:
     paths:
-      - projects/**
+      - packages/**
+      - flake.nix
+      - flake.lock
       - .github/workflows/build.yml
 
 permissions:
@@ -24,15 +26,22 @@ jobs:
   discover:
     runs-on: ubuntu-latest
     outputs:
-      projects: ${{ steps.list.outputs.projects }}
+      packages: ${{ steps.list.outputs.packages }}
     steps:
       - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
       - id: list
         run: |
-          only='${{ inputs.project }}'
-          names=$(ls projects)
-          if [ -n "$only" ]; then names="$only"; fi
-          echo "projects=$(printf '%s\n' $names | jq -Rsc 'split("\n") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          only='${{ inputs.package }}'
+          if [ -n "$only" ]; then
+            packages=$(jq -nc --arg p "$only" '[$p]')
+          else
+            packages=$(nix eval --json '.#packages.x86_64-linux' --apply 'builtins.attrNames')
+          fi
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
 
   build:
     needs: discover
@@ -40,104 +49,53 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        project: ${{ fromJSON(needs.discover.outputs.projects) }}
+        package: ${{ fromJSON(needs.discover.outputs.packages) }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
 
-      # Resolve what to build. `ref` is a commit, a tag, a branch, or the
-      # literal "latest-tag" to track upstream's newest tag.
-      - id: resolve
+      - id: meta
         run: |
           set -euo pipefail
-          cfg="projects/${{ matrix.project }}/config.json"
-          repo=$(jq -r .repo "$cfg")
-          ref=$(jq -r .ref "$cfg")
-
-          if [ "$ref" = "latest-tag" ]; then
-            ref=$(gh api "repos/$repo/tags" --jq '.[0].name')
-          fi
-          sha=$(gh api "repos/$repo/commits/$ref" --jq .sha)
-
-          version=$(jq -r '.version // ""' "$cfg")
-          if [ -z "$version" ]; then
-            case "$ref" in
-              [0-9a-f]*) [ ${#ref} -eq 40 ] && version="${sha:0:12}" || version="${ref#v}" ;;
-              *) version="${ref#v}" ;;
-            esac
-          fi
-
-          {
-            echo "repo=$repo"
-            echo "sha=$sha"
-            echo "version=$version"
-            echo "tag=${{ matrix.project }}-v$version"
-            echo "apt=$(jq -r '(.apt // []) | join(" ")' "$cfg")"
-            echo "toolchain=$(jq -r '.toolchain // "stable"' "$cfg")"
-          } >> "$GITHUB_OUTPUT"
+          version=$(nix eval --raw ".#${{ matrix.package }}.version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ matrix.package }}-v$version" >> "$GITHUB_OUTPUT"
+          echo "asset=${{ matrix.package }}-$version-x86_64-linux" >> "$GITHUB_OUTPUT"
 
       # A daily cron is a no-op once the release exists.
       - id: check
         run: |
           if [ "${{ inputs.force }}" = "true" ]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
-          elif gh release view "${{ steps.resolve.outputs.tag }}" >/dev/null 2>&1; then
-            echo "${{ steps.resolve.outputs.tag }} already released"
+          elif gh release view "${{ steps.meta.outputs.tag }}" >/dev/null 2>&1; then
+            echo "${{ steps.meta.outputs.tag }} already released"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
       - if: steps.check.outputs.skip == 'false'
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ steps.resolve.outputs.repo }}
-          ref: ${{ steps.resolve.outputs.sha }}
-          path: src
+        run: nix build --print-build-logs ".#${{ matrix.package }}"
 
-      - if: steps.check.outputs.skip == 'false' && steps.resolve.outputs.apt != ''
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install --no-install-recommends -y ${{ steps.resolve.outputs.apt }}
-
+      # The build output, plus the closure as a nix archive so a nix consumer
+      # can import it with its store references intact.
       - if: steps.check.outputs.skip == 'false'
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.resolve.outputs.toolchain }}
-
-      - if: steps.check.outputs.skip == 'false'
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src
-
-      # build.sh puts whatever should be released into $OUT.
-      - if: steps.check.outputs.skip == 'false'
-        env:
-          SRC: ${{ github.workspace }}/src
-          OUT: ${{ github.workspace }}/out
-          VERSION: ${{ steps.resolve.outputs.version }}
-          SHA: ${{ steps.resolve.outputs.sha }}
         run: |
           set -euo pipefail
-          mkdir -p "$OUT"
-          cd "$SRC"
-          bash "$GITHUB_WORKSPACE/projects/${{ matrix.project }}/build.sh"
-          test -n "$(ls -A "$OUT")" || { echo "build.sh produced no artifacts"; exit 1; }
-
-      - if: steps.check.outputs.skip == 'false'
-        id: package
-        run: |
-          set -euo pipefail
-          name="${{ matrix.project }}-${{ steps.resolve.outputs.version }}-x86_64-linux"
-          tar -czf "$name.tar.gz" -C out .
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
-          echo "name=$name" >> "$GITHUB_OUTPUT"
+          asset="${{ steps.meta.outputs.asset }}"
+          tar -czf "$asset.tar.gz" -C result .
+          nix-store --export $(nix-store --query --requisites result) | gzip > "$asset.nar.gz"
+          sha256sum "$asset.tar.gz" "$asset.nar.gz" > "$asset.sha256"
 
       - if: steps.check.outputs.skip == 'false'
         run: |
-          gh release create "${{ steps.resolve.outputs.tag }}" \
-            --title "${{ matrix.project }} ${{ steps.resolve.outputs.version }}" \
-            --notes "${{ steps.resolve.outputs.repo }} at ${{ steps.resolve.outputs.sha }}" \
-            "${{ steps.package.outputs.name }}.tar.gz" \
-            "${{ steps.package.outputs.name }}.tar.gz.sha256"
+          gh release create "${{ steps.meta.outputs.tag }}" \
+            --title "${{ matrix.package }} ${{ steps.meta.outputs.version }}" \
+            --notes "nix build .#${{ matrix.package }} from ${{ github.sha }}" \
+            "${{ steps.meta.outputs.asset }}.tar.gz" \
+            "${{ steps.meta.outputs.asset }}.nar.gz" \
+            "${{ steps.meta.outputs.asset }}.sha256"
