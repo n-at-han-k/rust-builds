@@ -92,7 +92,16 @@ jobs:
 
       - if: steps.check.outputs.skip == 'false'
         run: |
-          gh release create "${{ steps.meta.outputs.tag }}" \
-            --title "${{ matrix.package }} ${{ steps.meta.outputs.version }}" \
-            --notes "nix build .#${{ matrix.package }} from ${{ github.sha }}" \
-            dist/*
+          set -euo pipefail
+          tag='${{ steps.meta.outputs.tag }}'
+          # A forced rebuild has to be able to replace the assets of a release
+          # that already exists -- `gh release create` only errors on one, which
+          # left `force` unable to fix a bad asset at an unchanged version.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" \
+              --title "${{ matrix.package }} ${{ steps.meta.outputs.version }}" \
+              --notes "nix build .#${{ matrix.package }} from ${{ github.sha }}" \
+              dist/*
+          fi
